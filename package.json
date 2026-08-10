@@ -4,6 +4,7 @@
   "description": "MCP server bridging Claude Code (or any MCP client) to Cursor's headless cursor-agent: delegation, multi-axis adversarial reviews, and a prosecutor/advocate verification pair — with watchdogs, git safety gates and telemetry.",
   "type": "module",
   "license": "MIT",
+  "bin": { "cursor-bridge": "./bin/cursor-bridge.mjs" },
   "engines": { "node": ">=26" },
   "scripts": { "test": "node --test 'test/**/*.test.ts'" },
   "keywords": [

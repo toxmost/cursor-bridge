@@ -48,15 +48,30 @@ You'll need three things:
 - the **[cursor-agent CLI](https://cursor.com/cli)**, installed and signed in (`cursor-agent login`), with an active Cursor subscription;
 - **Claude Code** — or any other MCP client that can talk to stdio servers.
 
-Then:
+Then it's one command — `npx` fetches the server straight from GitHub, dependencies and all:
 
 ```bash
-git clone https://github.com/toxmost/cursor-bridge.git
-cd cursor-bridge
-./install.sh
+claude mcp add --scope user cursor-bridge -- npx -y github:toxmost/cursor-bridge
 ```
 
-The installer checks your environment, installs dependencies, registers the server with Claude Code (user scope, so it's available in every project), and drops in the optional **cursor-delegate skill** — a playbook that teaches Claude when to reach for which drawer, so you don't have to remember tool names. Run `./install.sh --no-skill` to skip the skill, `--uninstall` to remove everything.
+That's the whole install. `--scope user` makes the tools available in every project.
+
+Prefer a local checkout (say, for hacking on it)? Clone and point Claude at it:
+
+```bash
+git clone https://github.com/toxmost/cursor-bridge.git && cd cursor-bridge && npm ci --omit=dev
+claude mcp add --scope user cursor-bridge -- node "$PWD/src/server.ts"
+```
+
+**Optional but recommended** — the cursor-delegate skill, a playbook that teaches Claude when to reach for which drawer so you don't have to remember tool names. It's a single file:
+
+```bash
+mkdir -p ~/.claude/skills/cursor-delegate
+curl -fsSL https://raw.githubusercontent.com/toxmost/cursor-bridge/main/skills/cursor-delegate.SKILL.md \
+  -o ~/.claude/skills/cursor-delegate/SKILL.md
+```
+
+To uninstall: `claude mcp remove --scope user cursor-bridge` and delete the skill folder.
 
 One thing to remember: already-running Claude Code sessions keep their old toolset. Open a fresh session after installing.
 

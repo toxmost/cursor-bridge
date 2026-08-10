@@ -48,15 +48,30 @@ cursor-bridge это исправляет. Это MCP-сервер, которы
 - **[cursor-agent CLI](https://cursor.com/cli)**, установленный и залогиненный (`cursor-agent login`), с активной подпиской Cursor;
 - **Claude Code** — или любой другой MCP-клиент, умеющий stdio-серверы.
 
-Дальше:
+Дальше — одна команда: `npx` заберёт сервер прямо с GitHub, вместе с зависимостями:
 
 ```bash
-git clone https://github.com/toxmost/cursor-bridge.git
-cd cursor-bridge
-./install.sh
+claude mcp add --scope user cursor-bridge -- npx -y github:toxmost/cursor-bridge
 ```
 
-Установщик проверит окружение, поставит зависимости, зарегистрирует сервер в Claude Code (user-scope — будет доступен в каждом проекте) и положит опциональный **скилл cursor-delegate** — плейбук, который учит Claude, когда тянуться к какому отделению, чтобы вам не запоминать имена инструментов. `./install.sh --no-skill` — без скилла, `--uninstall` — убрать всё.
+Это вся установка. `--scope user` делает инструменты доступными в каждом проекте.
+
+Хочется локальную копию (например, чтобы поковыряться)? Клонируйте и укажите Claude на неё:
+
+```bash
+git clone https://github.com/toxmost/cursor-bridge.git && cd cursor-bridge && npm ci --omit=dev
+claude mcp add --scope user cursor-bridge -- node "$PWD/src/server.ts"
+```
+
+**Опционально, но рекомендуется** — скилл cursor-delegate: плейбук, который учит Claude, когда тянуться к какому отделению, чтобы вам не запоминать имена инструментов. Это один файл:
+
+```bash
+mkdir -p ~/.claude/skills/cursor-delegate
+curl -fsSL https://raw.githubusercontent.com/toxmost/cursor-bridge/main/skills/cursor-delegate.SKILL.md \
+  -o ~/.claude/skills/cursor-delegate/SKILL.md
+```
+
+Удаление: `claude mcp remove --scope user cursor-bridge` плюс снести папку скилла.
 
 Одна вещь, о которой стоит помнить: уже открытые сессии Claude Code держат старый набор инструментов. После установки откройте новую.
 
