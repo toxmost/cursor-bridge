@@ -1,102 +1,76 @@
 # cursor-bridge
 
-**MCP server that turns Cursor's headless `cursor-agent` into a disciplined second AI workforce for Claude Code** — delegate mechanical work, run multi-axis adversarial reviews, and verify findings with a prosecutor/advocate pair. Every job runs under watchdogs, git safety gates and local telemetry.
-
 🇷🇺 [Русская версия](README.ru.md)
 
----
+If you pay for both Claude Code and Cursor, you've probably noticed an awkward thing: Claude does all the work while your Cursor subscription mostly sits there, quietly renewing itself every month.
 
-## Why
+cursor-bridge fixes that. It's an MCP server that hands Cursor's headless `cursor-agent` to Claude Code as a **second AI workforce** — one that Claude can delegate to, argue with, and use as an independent fact-checker. Not a toy integration: every job runs under watchdog timers, git safety gates, and local telemetry, because the whole point is to trust the results.
 
-If you pay for both Claude Code and Cursor, your Cursor quota often sits idle while Claude does everything. cursor-bridge puts it to work:
+## The idea in one story
 
-- **A different model family reviews your artifacts.** Cross-model reviews catch what same-model reviews rubber-stamp.
-- **Mechanical work runs in parallel.** Bulk edits, codemods, boilerplate, test scaffolds — Composer grinds while Claude keeps architecting.
-- **Machine-checked verification.** Review findings are hypotheses; the refuter pair confirms or refutes each one against the actual code, with citations the server verifies literally.
+Say Claude just reviewed your code and found fifteen suspicious spots. Now what? You could read all fifteen yourself — that's an evening gone. You could trust them blindly — and about a quarter of AI review findings turn out to be wrong, so now you're "fixing" code that was fine.
 
-## The three mechanisms
+Or you could do what this project does: hand the findings to **a different model family** and let two adversarial roles fight over each one. A *prosecutor* tries to prove each bug is real by tracing the code path to the failure. An *advocate* tries to prove it's a false alarm by finding the guard clause, the lock, the documented design decision the reviewer missed. When they agree — with code citations the server literally verifies against your files — the case closes automatically. When they disagree, it lands on your desk. You end up reading three contested findings instead of fifteen.
 
-### 1. Delegation — `cursor_run` / `cursor_ask` / `cursor_reply`
+That's the philosophy running through the whole project: **automate the labor of verification, never the right to a final verdict.**
 
-Async jobs against any repo: `edit` mode (writes code, gated by a clean git tree or worktree isolation), `plan` and `ask` modes (read-only). Multi-turn: `cursor_reply` continues the same Composer chat. Up to 3 parallel agents; per-call model override.
+## What's inside
 
-### 2. Detectives — `cursor_review` (multi-axis adversarial review)
+One server, thirteen tools, three mechanisms. Think of it as a toolbox with three drawers.
 
-A review is **never single-axis**: 2–3 parallel reviewers with deliberately different temperaments read the same artifact and cannot see each other.
+### Drawer one: delegation
 
-| Axis set | Axes | For |
-|---|---|---|
-| `plan` (default) | broad · strict · hygiene | specs, plans, design docs |
-| `code` | correctness · security · tests | source code (always all 3) |
+The bread and butter. `cursor_run` starts an async Composer job in any repo — bulk edits, codemods, boilerplate, test scaffolds, the mechanical stuff that eats your day. `cursor_ask` is for quick questions, `cursor_reply` continues a conversation with the same agent. Jobs run up to three in parallel, and you can pick a different model per call.
 
-Findings come back as a structured table (marker / file:line / title per axis) plus raw outputs and a cross-axis overlap report. Machine clean-pass criterion: `completed && !parse_degraded && blockers_total == 0`.
+Write access is taken seriously: an editing job either requires a clean git tree or gets its own isolated git worktree. If it goes sideways, your work doesn't.
 
-### 3. Investigators — `cursor_refute` (prosecutor/advocate verification)
+### Drawer two: the detectives
 
-Feed it a pack of findings (1–12 per code area). Two adversarial roles run in parallel:
+`cursor_review` runs an adversarial review of any artifact — a spec, a plan, a diff, a module. The trick that makes it work: a review is **never a single reviewer**. Two or three parallel reviewers with deliberately different temperaments read the same thing without seeing each other. For documents that's *broad* (external risks and blind spots), *strict* (internal rigor, the cold examiner), and *hygiene* (tests that would pass on broken code). For source code it's *correctness*, *security*, and *tests* — always all three.
 
-- **prosecutor** — proves each bug is real by tracing the call chain to the failure;
-- **advocate** — proves it false by finding defenses and documented design decisions.
+Different temperaments genuinely find different things; the overlap report shows you where they agree, which is usually where the fire is.
 
-The server then applies a deliberately asymmetric consensus:
+### Drawer three: the investigators
 
-| Outcome | Condition |
-|---|---|
-| `confirmed` (auto) | both roles CONFIRMED, both citations machine-verified |
-| `refuted` (auto-close; **record is kept, never deleted**) | both roles REFUTED, both citations machine-verified |
-| `escalate` → human | anything else: disagreement, uncertainty, failed citation, missing verdict, degraded role, changed working tree |
+`cursor_refute` is the newest mechanism, the one from the story above. You feed it a pack of findings — up to twelve for one area of code — and the prosecutor/advocate pair goes to work. The server then applies a deliberately asymmetric rule:
 
-“Machine-verified citation” is literal: the quoted fragment must exist in the cited file **within ±20 lines of the cited line**, be substantive (not a `////` fence), come from a git-tracked file, and be accompanied by actual reasoning. The working tree is pinned between submit and result (`git` HEAD + dirty check); an unpinned tree kills all auto-verdicts. A failed or lazy role (>50 % of the pack ignored) kills all auto-closes for the pack.
+- **Auto-confirm** only when both roles say "real" with verified citations.
+- **Auto-close as refuted** only when both say "false alarm" with verified citations — and even then the record is kept forever, never deleted. A refuted finding is also a result.
+- **Everything else escalates to you**: disagreements, uncertainty, a citation that didn't check out, a role that died or got lazy.
 
-**Philosophy:** the bridge automates the *labor* of verification, never the *right* to a final verdict. Contested findings always reach a human.
+"Verified citation" means exactly that. The quoted code must actually exist in the cited file, within twenty lines of the cited line, must be substantive (a `////////` fence proves nothing), must come from a git-tracked file, and must be accompanied by actual reasoning. The server also pins your working tree between start and finish — if HEAD moved or the tree got dirty, all auto-verdicts are off, because a verdict about code that changed underneath it is worth nothing.
 
-## Tool reference
+## Getting started
 
-| Group | Tools |
-|---|---|
-| Delegation | `cursor_run`, `cursor_ask`, `cursor_reply` |
-| Review | `cursor_review`, `cursor_review_result` |
-| Verification | `cursor_refute`, `cursor_refute_result` |
-| Job management | `cursor_status`, `cursor_result`, `cursor_jobs`, `cursor_cancel`, `cursor_stats`, `cursor_mark_analyzed` |
+You'll need three things:
 
-Every result carries a `verify_note`: subagent output is an unverified claim until confirmed against the code.
+- **Node.js 26+** — the server runs TypeScript natively, there's no build step at all;
+- the **[cursor-agent CLI](https://cursor.com/cli)**, installed and signed in (`cursor-agent login`), with an active Cursor subscription;
+- **Claude Code** — or any other MCP client that can talk to stdio servers.
 
-## Requirements
-
-- **Node.js ≥ 26** (the server runs TypeScript natively — no build step)
-- **[cursor-agent CLI](https://cursor.com/cli)** installed and signed in (`cursor-agent login`), with an active Cursor subscription
-- **Claude Code** (or any MCP client that can spawn stdio servers)
-
-## Install
+Then:
 
 ```bash
-git clone https://github.com/<you>/cursor-bridge.git
+git clone https://github.com/toxmost/cursor-bridge.git
 cd cursor-bridge
-./install.sh            # server + Claude Code skill
-# ./install.sh --no-skill
-# ./install.sh --uninstall
+./install.sh
 ```
 
-The installer registers the server with `claude mcp add --scope user` and copies the optional **cursor-delegate skill** into `~/.claude/skills/` — the skill teaches Claude *when* to reach for which mechanism. For other MCP clients, register a stdio server running `node <repo>/src/server.ts`.
+The installer checks your environment, installs dependencies, registers the server with Claude Code (user scope, so it's available in every project), and drops in the optional **cursor-delegate skill** — a playbook that teaches Claude when to reach for which drawer, so you don't have to remember tool names. Run `./install.sh --no-skill` to skip the skill, `--uninstall` to remove everything.
 
-Start a **new** Claude Code session after installing — running sessions keep their old toolset.
+One thing to remember: already-running Claude Code sessions keep their old toolset. Open a fresh session after installing.
 
-## Usage
+## Day-to-day use
 
-Talk to Claude naturally; the skill routes to the right tool:
+You mostly just talk to Claude:
 
-```text
-» Delegate to Composer: add JSDoc to every exported function in src/.
-    → cursor_run(mode=edit) … cursor_result
+> "Delegate to Composer: add JSDoc to every exported function in src/."
+>
+> "Get me a second opinion on docs/design.md before I build this."
+>
+> "Here are five bug findings from the review — re-check them against the code."
 
-» Get a second opinion on docs/design.md.
-    → cursor_review(artifacts=[…], axis_set=plan) … cursor_review_result
-
-» Re-check these five bug findings against the code.
-    → cursor_refute(findings=[…], cwd=…) … cursor_refute_result
-```
-
-Or call tools directly — e.g. a verification pack:
+The skill routes each request to the right mechanism. If you prefer calling tools directly, here's what a verification pack looks like:
 
 ```jsonc
 // cursor_refute
@@ -109,34 +83,33 @@ Or call tools directly — e.g. a verification pack:
   }],
   "cwd": "/abs/path/to/repo",
   "context": "payments module; pinned read-only worktree",
-  "domain": "orchestration"   // feeds false-refute calibration
+  "domain": "orchestration"   // lets you track false-refute rates per domain later
 }
 ```
 
-## Reliability & safety
+Poll `cursor_refute_result` (it supports long-polling via `wait_sec`) and you get both roles' verdicts per finding, the consensus, and counters for auto-confirmed / auto-refuted / escalated.
 
-- **Three watchdog budgets** per job: hard timeout, first-token grace (thinking is not a hang), inter-token idle. The known `cursor-agent -p` hang bug is contained by design.
-- **Git gates:** in-place edits require a clean tree; `isolation: "worktree"` gives risky jobs their own git worktree.
-- **Read-only means read-only:** review and refute run in `ask` mode — they cannot touch your files.
-- **Local-only data:** job journals and telemetry live in `jobs/` and `logs/` inside the repo (gitignored). Nothing leaves your machine except the prompts sent to Cursor's API by `cursor-agent` itself.
-- **Prompts are visible in local `ps` output** — never put secrets in briefs.
+## Why you can trust it with real work
+
+A few hard-won design decisions, each of them paid for by an actual incident during development:
+
+- **Three separate watchdog budgets per job** — a hard timeout, a "first token" grace period (a model thinking for five minutes before answering is normal for heavy reviews, not a hang), and an inter-token stall detector. The known `cursor-agent -p` hang-forever bug is contained by design rather than hoped away.
+- **Read-only means read-only.** Reviews and verification run in ask mode; they physically cannot modify your files.
+- **Every result carries a `verify_note`** reminding whoever reads it — human or AI — that subagent output is an unverified claim until checked. This sounds preachy until the first time an agent folds a wrong finding into a spec.
+- **Everything stays local.** Job journals and telemetry live in `jobs/` and `logs/` inside the repo, both gitignored. Nothing leaves your machine except what `cursor-agent` itself sends to Cursor's API.
+- One honest caveat: **prompts are visible in local `ps` output**, so don't put secrets in briefs.
 
 ## Project layout
 
 ```text
-src/            server, job manager, watchdogs, git safety, review + refute engines, telemetry
-skills/         cursor-delegate skill for Claude Code (when to use which mechanism)
-tools/audit/    standalone repo-mapping helpers (build-blocks, preflight) for large-scale code audits
-test/           285 tests (node:test), including an end-to-end fake-agent harness
+src/            the server: job manager, watchdogs, git safety, review & refute engines, telemetry
+skills/         the cursor-delegate skill for Claude Code
+tools/audit/    standalone helpers for mapping large repos before a systematic code audit
+test/           285 tests (node:test), including an end-to-end harness with a fake agent
 ```
 
-## Development
-
-```bash
-npm ci
-npm test        # node --test, no build step
-```
+Development is refreshingly boring: `npm ci`, then `npm test`. No build, no bundler, no config.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Use it, fork it, break it, tell us what you found.
