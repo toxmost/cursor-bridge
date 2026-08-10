@@ -3,3 +3,4 @@ jobs/
 logs/
 .worktrees/
 dist/
+.DS_Store
