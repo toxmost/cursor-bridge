@@ -1,12 +1,19 @@
 {
   "name": "cursor-bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server bridging Claude Code (or any MCP client) to Cursor's headless cursor-agent: delegation, multi-axis adversarial reviews, and a prosecutor/advocate verification pair — with watchdogs, git safety gates and telemetry.",
   "type": "module",
   "license": "MIT",
-  "bin": { "cursor-bridge": "./bin/cursor-bridge.mjs" },
-  "engines": { "node": ">=26" },
-  "scripts": { "test": "node --test 'test/**/*.test.ts'" },
+  "bin": {
+    "cursor-bridge": "./bin/cursor-bridge.mjs"
+  },
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "test": "node --test 'test/**/*.test.ts'",
+    "prepare": "tsc -p tsconfig.build.json"
+  },
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -19,5 +26,18 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^3.25.0"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "src",
+    "skills",
+    "tools",
+    "README.md",
+    "README.ru.md",
+    "LICENSE"
+  ],
+  "devDependencies": {
+    "typescript": "^5.7.0"
   }
 }

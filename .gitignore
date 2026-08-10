@@ -2,3 +2,4 @@ node_modules/
 jobs/
 logs/
 .worktrees/
+dist/
