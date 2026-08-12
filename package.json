@@ -1,6 +1,6 @@
 {
   "name": "cursor-bridge",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "MCP server bridging Claude Code (or any MCP client) to Cursor's headless cursor-agent: delegation, multi-axis adversarial reviews, and a prosecutor/advocate verification pair — with watchdogs, git safety gates and telemetry.",
   "type": "module",
   "license": "MIT",

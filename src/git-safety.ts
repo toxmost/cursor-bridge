@@ -38,6 +38,19 @@ export async function gitTracked(cwd: string, relPath: string): Promise<boolean>
   }
 }
 
+/** All tracked paths, repo-relative. NUL-separated (-z): core.quotePath would
+ *  octal-escape non-ASCII names and break suffix matching against citations. */
+export async function gitLsFiles(cwd: string): Promise<string[]> {
+  try {
+    // Default execFile maxBuffer (1MB) is smaller than a monorepo's ls-files
+    // output — overflowing it would silently disable suffix resolution.
+    const { stdout } = await run("git", ["ls-files", "-z"], { cwd, maxBuffer: 64 * 1024 * 1024 });
+    return stdout.split("\0").filter((s) => s.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 export async function diffStat(cwd: string): Promise<string> {
   try {
     const { stdout } = await run("git", ["diff", "--stat", "HEAD"], { cwd });

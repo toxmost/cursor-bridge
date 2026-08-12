@@ -5,11 +5,11 @@
 import { randomUUID } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
-import { gitHead, gitInfo, gitTracked } from "./git-safety.ts";
+import { gitHead, gitInfo, gitLsFiles, gitTracked } from "./git-safety.ts";
 import type { JobManager } from "./job-manager.ts";
 import { MAX_ARTIFACT_BYTES, REVIEW_DEFAULTS } from "./review.ts";
 import {
-  computeConsensus, normalizeQuote, parseRoleVerdicts, quoteMatches,
+  computeConsensus, normalizeQuote, parseRoleVerdicts, quoteMatches, resolveCitedPath,
   type ConsensusResult, type RoleVerdict,
 } from "./refute-parser.ts";
 
@@ -77,6 +77,10 @@ ACCEPTANCE: вердикт по КАЖДОМУ id из папки — ответ
 CONFIRMED и REFUTED ОБЯЗАНЫ нести дословную цитату кода (фрагмент минимум в половину строки),
 на которой основан вывод, и точное файл:строка. Цитата будет машинно сверена с файлом —
 пересказ вместо дословного фрагмента провалит проверку. UNCLEAR требует причины, цитата не нужна.
+ПРАВИЛО OWNER-МАРКЕРА: REFUTED со ссылкой на задокументированное/намеренное решение валиден
+ТОЛЬКО с цитатой owner-маркера — даты решения, номера ISSUE, ADR или пинующего теста.
+Голый комментарий в коде («осознанный fail-open») — НЕ решение и не owner-маркер:
+без маркера выноси UNCLEAR с причиной «решение не ратифицировано владельцем».
 
 OUTPUT: по одной строке на дело, ровно в формате:
 <id> — CONFIRMED|REFUTED|UNCLEAR — <файл>:<строка> — «дословная цитата» — <обоснование одной фразой>
@@ -194,7 +198,26 @@ export class RefuteManager {
    * In a git cwd the cited file must be TRACKED — ignored/untracked files are
    * invisible to the HEAD+porcelain pin and therefore unpinnable (cycle 3).
    */
-  async #readCited(rec: RefuteRecord, cited: string): Promise<string | null> {
+  async #readCited(
+    rec: RefuteRecord,
+    cited: string,
+    tracked: () => Promise<string[]>,
+  ): Promise<string | null> {
+    const direct = await this.#readResolved(rec, cited);
+    if (direct !== null) return direct;
+    // Truncated-citation fallback (calibration 2026-08-12): models cite
+    // "/cancel/route.ts" for a deep route. Resolve by UNIQUE whole-segment
+    // suffix against the tracked list — git-only, because without that list
+    // there is nothing safe to anchor the suffix to. Ambiguity stays a
+    // citation failure; the resolved path re-enters the same containment/
+    // tracked/stat-cap gauntlet as a directly cited one.
+    if (!rec.pin.isGit) return null;
+    const resolved = resolveCitedPath(cited, await tracked());
+    if (resolved === null) return null;
+    return this.#readResolved(rec, resolved);
+  }
+
+  async #readResolved(rec: RefuteRecord, cited: string): Promise<string | null> {
     try {
       const realCwd = await realpath(rec.cwd);
       const abs = path.isAbsolute(cited) ? cited : path.join(realCwd, cited);
@@ -235,6 +258,10 @@ export class RefuteManager {
     // role's OWN reasoning: empty, or equal to the quote once quote punctuation
     // is stripped from both sides («quote» as the last field is not a reason).
     const fileCache = new Map<string, string | null>();
+    // Tracked list is fetched lazily and at most once per result() call: only
+    // citations that failed direct resolution need it.
+    let trackedP: Promise<string[]> | undefined;
+    const tracked = (): Promise<string[]> => (trackedP ??= gitLsFiles(rec.cwd));
     // Strip quote punctuation AND trailing punctuation/dashes before the
     // reason-vs-quote comparison: «quote». or «quote» — (dangling separator)
     // as the last field is still no reason (cycles 4-5).
@@ -246,7 +273,7 @@ export class RefuteManager {
       if (bare(v.reason) === "" || bare(v.reason) === bare(v.quote)) {
         return { ...v, quoteVerified: false };
       }
-      if (!fileCache.has(v.file)) fileCache.set(v.file, await this.#readCited(rec, v.file));
+      if (!fileCache.has(v.file)) fileCache.set(v.file, await this.#readCited(rec, v.file, tracked));
       const text = fileCache.get(v.file) ?? null;
       return { ...v, quoteVerified: text !== null && quoteMatches(v.quote, text, v.line) };
     };

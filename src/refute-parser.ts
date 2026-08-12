@@ -15,6 +15,12 @@ export function normalizeQuote(s: string): string {
   return s.replace(/\s+/gu, " ").trim();
 }
 
+// Line-leading comment decoration: block-comment continuation "*" (never the
+// closing "*/") or "//". A quote spanning a comment line break carries the
+// prose without the decoration, so the file-side window gets a second,
+// decoration-stripped rendering (calibration 2026-08-12, case E1).
+const LINE_DECOR_RE = /^[ \t]*(?:\*(?!\/)|\/\/+)[ \t]?/u;
+
 /**
  * Whitespace-tolerant literal containment ANCHORED to the cited line: the quote
  * must occur inside the ±QUOTE_LINE_TOL window around `line`. A hit anywhere
@@ -29,8 +35,25 @@ export function quoteMatches(quote: string, fileText: string, line: number | nul
   if ((q.match(/[\p{L}\p{N}_]/gu) ?? []).length < MIN_QUOTE_WORD_CHARS) return false;
   const lines = fileText.split("\n");
   const from = Math.max(0, line - 1 - QUOTE_LINE_TOL);
-  const window = lines.slice(from, line + QUOTE_LINE_TOL).join("\n");
-  return normalizeQuote(window).includes(q);
+  const window = lines.slice(from, line + QUOTE_LINE_TOL);
+  if (normalizeQuote(window.join("\n")).includes(q)) return true;
+  return normalizeQuote(window.map((l) => l.replace(LINE_DECOR_RE, "")).join("\n")).includes(q);
+}
+
+/**
+ * Resolve a possibly TRUNCATED cited path against the tracked-file list by
+ * whole-segment suffix (same class as review-parser commonTail: models cite
+ * "/cancel/route.ts" for a deep route). An exact tracked path wins outright;
+ * otherwise the suffix must be UNIQUE — picking the first of several homonyms
+ * could verify a quote against the wrong file, so ambiguity fails the citation
+ * (fail-safe: this function may only turn citation failures into honest reads).
+ */
+export function resolveCitedPath(cited: string, tracked: readonly string[]): string | null {
+  const c = cited.trim().replace(/^(?:\.\/)+/u, "").replace(/^\/+/u, "");
+  if (c === "") return null;
+  if (tracked.includes(c)) return c;
+  const matches = tracked.filter((t) => t.endsWith("/" + c));
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 export const REFUTE_VERDICTS = ["CONFIRMED", "REFUTED", "UNCLEAR"] as const;

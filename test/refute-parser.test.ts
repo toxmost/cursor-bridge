@@ -210,13 +210,18 @@ test("консенсус: REFUTED✓ × REFUTED✓ -> refuted (авто-закр
 });
 
 test("консенсус: спор CONFIRMED✓ × REFUTED✓ -> escalate/disagreement (обе стороны)", () => {
-  assert.equal(computeConsensus(v("CONFIRMED", true), v("REFUTED", true), OK).escalateReason, "disagreement");
-  assert.equal(computeConsensus(v("REFUTED", true), v("CONFIRMED", true), OK).escalateReason, "disagreement");
+  // deepEqual, не только reason: мутант {consensus:"refuted", escalateReason:"disagreement"}
+  // не должен выживать (финальное ревью ветки, tests-ось)
+  assert.deepEqual(computeConsensus(v("CONFIRMED", true), v("REFUTED", true), OK),
+    { consensus: "escalate", escalateReason: "disagreement" });
+  assert.deepEqual(computeConsensus(v("REFUTED", true), v("CONFIRMED", true), OK),
+    { consensus: "escalate", escalateReason: "disagreement" });
 });
 
 test("консенсус: UNCLEAR у любого -> escalate/unclear", () => {
   const u: RoleVerdict = { verdict: "UNCLEAR", file: null, line: null, quote: null, reason: "не смог", quoteVerified: null };
-  assert.equal(computeConsensus(u, v("REFUTED", true), OK).escalateReason, "unclear");
+  assert.deepEqual(computeConsensus(u, v("REFUTED", true), OK),
+    { consensus: "escalate", escalateReason: "unclear" });
 });
 
 test("консенсус: цитата не прошла проверку -> понижение до needs-repro, escalate/citation_failed", () => {
@@ -226,7 +231,8 @@ test("консенсус: цитата не прошла проверку -> п�
 });
 
 test("консенсус: вердикт отсутствует -> escalate/missing_verdict", () => {
-  assert.equal(computeConsensus(null, v("REFUTED", true), OK).escalateReason, "missing_verdict");
+  assert.deepEqual(computeConsensus(null, v("REFUTED", true), OK),
+    { consensus: "escalate", escalateReason: "missing_verdict" });
 });
 
 test("консенсус: деградация роли глушит авто-закрытие; одиночный REFUTED✓ выжившей роли -> confidence_lowered", () => {
@@ -244,4 +250,109 @@ test("консенсус: REFUTED от САМОЙ деградированной
   // а полноценный REFUTED✓ на фоне деградировавшего партнёра — понижает
   const r2 = computeConsensus(v("CONFIRMED", true), v("REFUTED", true), { p: true, a: false });
   assert.equal(r2.confidenceLowered, true);
+});
+
+// ---- Калибровка 2026-08-12: суффикс-резолв усечённых путей цитат ----
+
+test("resolveCitedPath: усечённый абсолютный путь резолвится уникальным суффиксом против tracked", async () => {
+  const { resolveCitedPath } = await import("../src/refute-parser.ts");
+  const tracked = [
+    "apps/medusa/src/api/admin/acme/orders/[id]/cancel/route.ts",
+    "apps/medusa/src/api/admin/acme/orders/[id]/retry/route.ts",
+    "packages/plugin-1c/src/write/payload.ts",
+  ];
+  assert.equal(
+    resolveCitedPath("/cancel/route.ts", tracked),
+    "apps/medusa/src/api/admin/acme/orders/[id]/cancel/route.ts",
+  );
+  assert.equal(
+    resolveCitedPath("cancel/route.ts", tracked),
+    "apps/medusa/src/api/admin/acme/orders/[id]/cancel/route.ts",
+  );
+  assert.equal(
+    resolveCitedPath("./write/payload.ts", tracked),
+    "packages/plugin-1c/src/write/payload.ts",
+  );
+});
+
+test("resolveCitedPath: НЕОДНОЗНАЧНЫЙ суффикс (2+ tracked) — null, не выбор первого", async () => {
+  const { resolveCitedPath } = await import("../src/refute-parser.ts");
+  const tracked = ["apps/a/cancel/route.ts", "apps/b/cancel/route.ts"];
+  assert.equal(resolveCitedPath("/cancel/route.ts", tracked), null);
+  assert.equal(resolveCitedPath("route.ts", tracked), null);
+});
+
+test("resolveCitedPath: точное совпадение с tracked бьёт суффикс-омонимы", async () => {
+  const { resolveCitedPath } = await import("../src/refute-parser.ts");
+  const tracked = ["src/pay.ts", "vendor/src/pay.ts"];
+  // цитата "src/pay.ts" точно называет tracked-файл — vendor-омоним не делает её неоднозначной
+  assert.equal(resolveCitedPath("src/pay.ts", tracked), "src/pay.ts");
+});
+
+test("resolveCitedPath: суффикс только по ЦЕЛЫМ сегментам — обрубок имени не матчится", async () => {
+  const { resolveCitedPath } = await import("../src/refute-parser.ts");
+  const tracked = ["apps/a/cancel/route.ts"];
+  assert.equal(resolveCitedPath("ncel/route.ts", tracked), null);
+  assert.equal(resolveCitedPath("oute.ts", tracked), null);
+});
+
+test("resolveCitedPath: нет совпадений / пустая цитата — null", async () => {
+  const { resolveCitedPath } = await import("../src/refute-parser.ts");
+  assert.equal(resolveCitedPath("missing.ts", ["src/pay.ts"]), null);
+  assert.equal(resolveCitedPath("", ["src/pay.ts"]), null);
+  assert.equal(resolveCitedPath("/", ["src/pay.ts"]), null);
+  assert.equal(resolveCitedPath("./", ["src/pay.ts"]), null);
+});
+
+// ---- Калибровка 2026-08-12: цитата, разорванная переносом в комментарии (кейс E1) ----
+
+test("quoteMatches: цитата через перенос строки внутри блочного комментария — декорация '*' не рвёт матч", async () => {
+  const { quoteMatches } = await import("../src/refute-parser.ts");
+  // реальный кейс калибровки E1: текст комментария разорван переносом,
+  // на стыке строк стоит декорация продолжения комментария " * "
+  const file = [
+    "/**",
+    " * (проверено интеграционно) — повторный POST того же заказа с тем же ключом не",
+    " * создаёт второй документ, а retry-lookup по ключу детерминирован и не",
+    " */",
+  ].join("\n");
+  const quote = "повторный POST того же заказа с тем же ключом не создаёт второй документ";
+  assert.equal(quoteMatches(quote, file, 2), true);
+});
+
+test("quoteMatches: перенос внутри '//'-комментария — тот же класс, матчится", async () => {
+  const { quoteMatches } = await import("../src/refute-parser.ts");
+  const file = [
+    "// осознанный fail-open: резолв ветки упал, но retail-покупателя",
+    "// не блокируем до выяснения причин",
+    "doWork();",
+  ].join("\n");
+  assert.equal(quoteMatches("резолв ветки упал, но retail-покупателя не блокируем", file, 1), true);
+});
+
+test("quoteMatches: декорация-стрип НЕ ослабляет привязку к строке", async () => {
+  const { QUOTE_LINE_TOL, quoteMatches } = await import("../src/refute-parser.ts");
+  const pad = Array.from({ length: QUOTE_LINE_TOL + 10 }, (_, i) => `const filler${i} = ${i};`);
+  const file = [...pad, " * повторный POST того же заказа не", " * создаёт второй документ"].join("\n");
+  // цитата лежит на строках 31-32, а вердикт указывает строку 1 — вне окна ±20
+  assert.equal(quoteMatches("повторный POST того же заказа не создаёт второй документ", file, 1), false);
+});
+
+test("quoteMatches: substance-гвард НЕ ослаблен — «/**» и «return;» отбраковываются (регресс калибровки G9/G3)", async () => {
+  const { quoteMatches } = await import("../src/refute-parser.ts");
+  assert.equal(quoteMatches("/**", "/**\n * doc\n */", 1), false);
+  assert.equal(quoteMatches("return;", "function f() {\n  return;\n}", 2), false);
+});
+
+test("quoteMatches: ДОСЛОВНАЯ цитата с декорацией («* создаёт…») проходит через нестрипнутый вариант окна", async () => {
+  const { quoteMatches } = await import("../src/refute-parser.ts");
+  const file = " * повторный POST того же заказа не\n * создаёт второй документ";
+  // мутант «только стрипнутое окно» убил бы дословное цитирование декорации
+  assert.equal(quoteMatches("заказа не * создаёт второй документ", file, 1), true);
+});
+
+test("quoteMatches: закрывающий «*/» НЕ стрипается в «/» — сфабрикованный слэш-текст не матчится", async () => {
+  const { quoteMatches } = await import("../src/refute-parser.ts");
+  const file = "alphaValue\n */\nbetaValue";
+  assert.equal(quoteMatches("alphaValue / betaValue", file, 1), false);
 });

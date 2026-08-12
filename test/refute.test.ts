@@ -413,3 +413,126 @@ test("result: unknown refute_id -> внятная ошибка", async () => {
   const rm = new RefuteManager(fakeJm() as never);
   await assert.rejects(() => rm.result("nope"), /unknown refute_id/);
 });
+
+// ---- Калибровка 2026-08-12: суффикс-резолв усечённых путей в #readCited ----
+
+test("result: усечённый путь цитаты резолвится уникальным суффиксом по tracked -> честный вердикт, не citation_failed", async () => {
+  // 8/9 эскалаций orchestration-пака: роли цитируют «/cancel/route.ts» вместо
+  // apps/.../cancel/route.ts при точной цитате-строке — согласие ролей терялось
+  const dir = await mkRepo({
+    "apps/medusa/src/api/admin/orders/cancel/route.ts":
+      "await ledger.withLock(order.id, async () => spend())",
+  });
+  const line = "B-001 — REFUTED — /cancel/route.ts:1 — «ledger.withLock(order.id, async» — лок закрывает гонку";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  const r = await rm.result(refuteId);
+  assert.equal(r.verdicts[0]!.prosecutor!.quoteVerified, true);
+  assert.equal(r.autoRefuted, 1);
+});
+
+test("result: НЕОДНОЗНАЧНЫЙ суффикс (2 tracked-омонима) -> провал цитаты, escalate/citation_failed", async () => {
+  const body = "await ledger.withLock(order.id, async () => spend())";
+  const dir = await mkRepo({
+    "apps/a/cancel/route.ts": body,
+    "apps/b/cancel/route.ts": body,
+  });
+  const line = "B-001 — REFUTED — /cancel/route.ts:1 — «ledger.withLock(order.id, async» — лок";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  const r = await rm.result(refuteId);
+  assert.equal(r.autoRefuted, 0);
+  assert.equal(r.verdicts[0]!.prosecutor!.quoteVerified, false);
+  assert.equal(r.verdicts[0]!.escalateReason, "citation_failed");
+});
+
+test("result: суффикс-фолбэк требует git — в не-git cwd усечённый путь НЕ резолвится", async () => {
+  // без gitTracked-списка суффикс не к чему прикалывать; и пин всё равно false
+  const dir = await mkdtemp(path.join(tmpdir(), "refute-"));
+  await mkdir(path.join(dir, "apps/x/cancel"), { recursive: true });
+  await fsWrite(
+    path.join(dir, "apps/x/cancel/route.ts"),
+    "await ledger.withLock(order.id, async () => spend())",
+  );
+  const line = "B-001 — REFUTED — /cancel/route.ts:1 — «ledger.withLock(order.id, async» — лок";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  const r = await rm.result(refuteId);
+  assert.equal(r.verdicts[0]!.prosecutor!.quoteVerified, false);
+  assert.equal(r.autoRefuted, 0);
+});
+
+// ---- Калибровка 2026-08-12: правило owner-маркера (решение владельца) ----
+
+test("брифы: ОБЕ роли несут правило owner-маркера (пин ФОРМУЛИРОВКИ брифа; машинного гейта нет — решение владельца)", () => {
+  // источник: оба false-refute калибровки (класс «comment-as-decision»):
+  // роли приняли голый code-comment («Осознанный fail-open») за ратифицированное решение.
+  // Гейт промпт-уровневый: детерминированной машинной проверки «цитата содержит
+  // owner-маркер» здесь нет намеренно — семантика маркера не регэкспится надёжно
+  const s = { findings: [finding("B-001")], context: "ctx" };
+  for (const role of REFUTE_ROLES) {
+    const brief = renderRefuteBrief(role, s);
+    assert.match(brief, /owner-маркер/u);
+    // состав маркера: дата решения / ISSUE / ADR / пинующий тест
+    assert.match(brief, /дат/iu);
+    assert.match(brief, /ISSUE/u);
+    assert.match(brief, /ADR/u);
+    assert.match(brief, /пину[юе]щ/iu);
+    // голый комментарий в коде — НЕ решение: вердикт обязан уйти в UNCLEAR
+    assert.match(brief, /комментари[йяи][^\n]*не[^\n]*(решени|маркер)|не[^\n]*решени[^\n]*комментари/iu);
+  }
+});
+
+test("result: cwd стал git-репо МЕЖДУ submit и result -> суффикс-фолбэк всё равно выключен (привязан к пину submit)", async () => {
+  // дифференциальный пин: фолбэк читает tracked-список по СОСТОЯНИЮ НА SUBMIT
+  // (pin.isGit), а не по текущему — иначе цитата верифицируется по непину
+  const dir = await mkdtemp(path.join(tmpdir(), "refute-"));
+  await mkdir(path.join(dir, "apps/x/cancel"), { recursive: true });
+  await fsWrite(
+    path.join(dir, "apps/x/cancel/route.ts"),
+    "await ledger.withLock(order.id, async () => spend())",
+  );
+  const line = "B-001 — REFUTED — /cancel/route.ts:1 — «ledger.withLock(order.id, async» — лок";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  execSync("git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm late", {
+    cwd: dir, shell: "/bin/sh",
+  });
+  const r = await rm.result(refuteId);
+  assert.equal(r.verdicts[0]!.prosecutor!.quoteVerified, false);
+  assert.equal(r.autoRefuted, 0);
+});
+
+test("result: dirty worktree (незакоммиченная правка, HEAD тот же) -> cwd_pinned=false, escalate/cwd_changed", async () => {
+  // финальное ревью ветки (tests-ось): смена HEAD запинована, а dirty — нет;
+  // регрессия !pin.dirty/!now.dirty оставалась бы зелёной на HEAD-тестах
+  const dir = await mkRepo({ "src/pay.ts": "await ledger.withLock(order.id, async () => spend())" });
+  const line = "B-001 — REFUTED — src/pay.ts:1 — «ledger.withLock(order.id, async» — лок";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  await fsWrite(path.join(dir, "src/pay.ts"), "await ledger.withLock(order.id, async () => spend()) // изменено");
+  const r = await rm.result(refuteId);
+  assert.equal(r.cwdPinned, false);
+  assert.equal(r.autoRefuted, 0);
+  assert.equal(r.verdicts[0]!.escalateReason, "cwd_changed");
+});
