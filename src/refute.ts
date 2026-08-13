@@ -9,7 +9,8 @@ import { gitHead, gitInfo, gitLsFiles, gitTracked } from "./git-safety.ts";
 import type { JobManager } from "./job-manager.ts";
 import { MAX_ARTIFACT_BYTES, REVIEW_DEFAULTS } from "./review.ts";
 import {
-  computeConsensus, normalizeQuote, parseRoleVerdicts, quoteMatches, resolveCitedPath,
+  citedPathCandidates, computeConsensus, MAX_CITED_CANDIDATES, normalizeQuote,
+  parseRoleVerdicts, uniqueQuoteMatch,
   type ConsensusResult, type RoleVerdict,
 } from "./refute-parser.ts";
 
@@ -75,7 +76,9 @@ CONSTRAINTS: read-only, НИЧЕГО не редактируй. Работай �
 
 ACCEPTANCE: вердикт по КАЖДОМУ id из папки — ответ без вердикта по какому-то делу не принимается.
 CONFIRMED и REFUTED ОБЯЗАНЫ нести дословную цитату кода (фрагмент минимум в половину строки),
-на которой основан вывод, и точное файл:строка. Цитата будет машинно сверена с файлом —
+на которой основан вывод, и точное файл:строка, где файл — ПОЛНЫЙ путь от корня репозитория
+(как в выводе git ls-files); усечённый путь («/cancel/route.ts») провалит проверку,
+если в репозитории есть другой файл с таким же хвостом. Цитата будет машинно сверена с файлом —
 пересказ вместо дословного фрагмента провалит проверку. UNCLEAR требует причины, цитата не нужна.
 ПРАВИЛО OWNER-МАРКЕРА: REFUTED со ссылкой на задокументированное/намеренное решение валиден
 ТОЛЬКО с цитатой owner-маркера — даты решения, номера ISSUE, ADR или пинующего теста.
@@ -202,19 +205,21 @@ export class RefuteManager {
     rec: RefuteRecord,
     cited: string,
     tracked: () => Promise<string[]>,
-  ): Promise<string | null> {
+  ): Promise<Array<string | null> | null> {
     const direct = await this.#readResolved(rec, cited);
-    if (direct !== null) return direct;
+    if (direct !== null) return [direct];
     // Truncated-citation fallback (calibration 2026-08-12): models cite
-    // "/cancel/route.ts" for a deep route. Resolve by UNIQUE whole-segment
+    // "/cancel/route.ts" for a deep route. Candidates come from whole-segment
     // suffix against the tracked list — git-only, because without that list
-    // there is nothing safe to anchor the suffix to. Ambiguity stays a
-    // citation failure; the resolved path re-enters the same containment/
-    // tracked/stat-cap gauntlet as a directly cited one.
+    // there is nothing safe to anchor the suffix to. Homonyms are read and
+    // handed to content disambiguation (uniqueQuoteMatch); the cap rejects
+    // BEFORE any read — sampling candidates would fake uniqueness. Every
+    // candidate re-enters the same containment/tracked/stat-cap gauntlet,
+    // and a candidate failing it stays null (uniqueness unprovable).
     if (!rec.pin.isGit) return null;
-    const resolved = resolveCitedPath(cited, await tracked());
-    if (resolved === null) return null;
-    return this.#readResolved(rec, resolved);
+    const candidates = citedPathCandidates(cited, await tracked());
+    if (candidates.length === 0 || candidates.length > MAX_CITED_CANDIDATES) return null;
+    return Promise.all(candidates.map((p) => this.#readResolved(rec, p)));
   }
 
   async #readResolved(rec: RefuteRecord, cited: string): Promise<string | null> {
@@ -257,7 +262,7 @@ export class RefuteManager {
     // quoteMatches is line-anchored and substance-checked. Reason must carry the
     // role's OWN reasoning: empty, or equal to the quote once quote punctuation
     // is stripped from both sides («quote» as the last field is not a reason).
-    const fileCache = new Map<string, string | null>();
+    const fileCache = new Map<string, Array<string | null> | null>();
     // Tracked list is fetched lazily and at most once per result() call: only
     // citations that failed direct resolution need it.
     let trackedP: Promise<string[]> | undefined;
@@ -274,8 +279,8 @@ export class RefuteManager {
         return { ...v, quoteVerified: false };
       }
       if (!fileCache.has(v.file)) fileCache.set(v.file, await this.#readCited(rec, v.file, tracked));
-      const text = fileCache.get(v.file) ?? null;
-      return { ...v, quoteVerified: text !== null && quoteMatches(v.quote, text, v.line) };
+      const texts = fileCache.get(v.file) ?? null;
+      return { ...v, quoteVerified: texts !== null && uniqueQuoteMatch(v.quote, texts, v.line) };
     };
     // Per-role degradation: job death OR ignoring >50% of the pack (the answer
     // is not accepted as a whole, spec §8). Only a NON-degraded role's verdict

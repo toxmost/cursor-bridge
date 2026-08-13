@@ -536,3 +536,148 @@ test("result: dirty worktree (незакоммиченная правка, HEAD 
   assert.equal(r.autoRefuted, 0);
   assert.equal(r.verdicts[0]!.escalateReason, "cwd_changed");
 });
+
+// ---- Волна ambiguous-citations: (б) дизамбигуация по содержимому + (а) полный путь в брифе ----
+
+test("result: омонимы с РАЗНЫМИ телами, цитата уникальна для одного -> честный вердикт (дизамбигуация по содержимому)", async () => {
+  const dir = await mkRepo({
+    "apps/orders/cancel/route.ts": "await ledger.withLock(order.id, async () => spend())",
+    "apps/shipments/cancel/route.ts": "export const somethingElseEntirely = configureRoutes();",
+  });
+  const line = "B-001 — REFUTED — /cancel/route.ts:1 — «ledger.withLock(order.id, async» — лок закрывает гонку";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  const r = await rm.result(refuteId);
+  assert.equal(r.verdicts[0]!.prosecutor!.quoteVerified, true);
+  assert.equal(r.autoRefuted, 1);
+});
+
+test("result: цитата совпала в ДВУХ омонимах -> уникальности нет, escalate/citation_failed (пин fail-safe)", async () => {
+  const body = "await ledger.withLock(order.id, async () => spend())";
+  const dir = await mkRepo({ "apps/a/cancel/route.ts": body, "apps/b/cancel/route.ts": body });
+  const line = "B-001 — REFUTED — /cancel/route.ts:1 — «ledger.withLock(order.id, async» — лок";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  const r = await rm.result(refuteId);
+  assert.equal(r.autoRefuted, 0);
+  assert.equal(r.verdicts[0]!.escalateReason, "citation_failed");
+});
+
+test("result: омонимов больше капа -> провал без выбора «первых N» (кап = эскалация, не сэмплинг)", async () => {
+  const { MAX_CITED_CANDIDATES } = await import("../src/refute-parser.ts");
+  const files: Record<string, string> = {};
+  for (let i = 0; i <= MAX_CITED_CANDIDATES; i++) {
+    files[`apps/a${i}/cancel/route.ts`] = `export const filler${i} = ${i};`;
+  }
+  // цитата существует ровно в одном из cap+1 омонимов, причём в ПЕРВОМ по сортировке:
+  // мутант «кап → сэмплинг первых N» нашёл бы её уникальной в сэмпле и дал verified —
+  // честный кап обязан провалить всё целиком, до чтений
+  files["apps/a0/cancel/route.ts"] = "await ledger.withLock(order.id, async () => spend())";
+  const dir = await mkRepo(files);
+  const line = "B-001 — REFUTED — /cancel/route.ts:1 — «ledger.withLock(order.id, async» — лок";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  const r = await rm.result(refuteId);
+  assert.equal(r.autoRefuted, 0);
+  assert.equal(r.verdicts[0]!.escalateReason, "citation_failed");
+});
+
+test("result: нечитаемый омоним (symlink наружу) -> уникальность недоказуема, escalate", async () => {
+  const { symlinkSync } = await import("node:fs");
+  const dir = await mkdtemp(path.join(tmpdir(), "refute-"));
+  await mkdir(path.join(dir, "apps/orders/cancel"), { recursive: true });
+  await mkdir(path.join(dir, "apps/ghost/cancel"), { recursive: true });
+  await fsWrite(
+    path.join(dir, "apps/orders/cancel/route.ts"),
+    "await ledger.withLock(order.id, async () => spend())",
+  );
+  symlinkSync("/etc/hosts", path.join(dir, "apps/ghost/cancel/route.ts"));
+  execSync("git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm fixture", {
+    cwd: dir, shell: "/bin/sh",
+  });
+  const line = "B-001 — REFUTED — /cancel/route.ts:1 — «ledger.withLock(order.id, async» — лок";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  const r = await rm.result(refuteId);
+  assert.equal(r.autoRefuted, 0);
+  assert.equal(r.verdicts[0]!.prosecutor!.quoteVerified, false);
+});
+
+test("брифы: требование ПОЛНОГО пути от корня репозитория в обеих ролях (фикс (а) волны ambiguous-citations)", () => {
+  const s = { findings: [finding("B-001")], context: "ctx" };
+  for (const role of REFUTE_ROLES) {
+    const brief = renderRefuteBrief(role, s);
+    assert.match(brief, /полн\S* путь/iu);
+    assert.match(brief, /от корня репозитория/iu);
+    assert.match(brief, /усеч\S+[^\n]*провал/iu); // «усечённый путь провалит проверку»
+  }
+});
+
+test("result: РОВНО кап омонимов (8) с уникальной цитатой -> дизамбигуация работает (граница не off-by-one)", async () => {
+  const { MAX_CITED_CANDIDATES } = await import("../src/refute-parser.ts");
+  const files: Record<string, string> = {};
+  for (let i = 1; i < MAX_CITED_CANDIDATES; i++) {
+    files[`apps/a${i}/cancel/route.ts`] = `export const filler${i} = ${i};`;
+  }
+  files["apps/a0/cancel/route.ts"] = "await ledger.withLock(order.id, async () => spend())";
+  const dir = await mkRepo(files);
+  const line = "B-001 — REFUTED — /cancel/route.ts:1 — «ledger.withLock(order.id, async» — лок";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  const r = await rm.result(refuteId);
+  assert.equal(r.verdicts[0]!.prosecutor!.quoteVerified, true);
+  assert.equal(r.autoRefuted, 1);
+});
+
+test("result: dirty на SUBMIT (чистое дерево к result) -> cwd_pinned=false (пин обеих сторон брекета)", async () => {
+  const dir = await mkRepo({ "src/pay.ts": "await ledger.withLock(order.id, async () => spend())" });
+  await fsWrite(path.join(dir, "src/pay.ts"), "await ledger.withLock(order.id, async () => spend()) // wip");
+  const line = "B-001 — REFUTED — src/pay.ts:1 — «ledger.withLock(order.id, async» — лок";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  // к моменту result дерево снова чистое БЕЗ смены HEAD (restore, не коммит):
+  // различить может только зафиксированный submit-пином dirty — коммит здесь
+  // маскировал бы проверку head-мисматчем
+  execSync("git checkout -- src/pay.ts", { cwd: dir, shell: "/bin/sh" });
+  const r = await rm.result(refuteId);
+  assert.equal(r.cwdPinned, false);
+  assert.equal(r.autoRefuted, 0);
+});
+
+test("result: CONFIRMED×2 с валидными цитатами в чистом репо -> autoConfirmed=1 (позитивный пин)", async () => {
+  const dir = await mkRepo({ "src/pay.ts": "await ledger.withLock(order.id, async () => spend())" });
+  const line = "B-001 — CONFIRMED — src/pay.ts:1 — «ledger.withLock(order.id, async» — гонка реальна";
+  const jm = fakeJmWithResults({
+    j1: { status: "completed", resultText: line },
+    j2: { status: "completed", resultText: line },
+  });
+  const rm = new RefuteManager(jm as never);
+  const { refuteId } = await rm.submit({ findings: [finding("B-001")], cwd: dir, context: "c" });
+  const r = await rm.result(refuteId);
+  assert.equal(r.autoConfirmed, 1);
+  assert.equal(r.verdicts[0]!.consensus, "confirmed");
+});

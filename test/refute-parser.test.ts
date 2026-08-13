@@ -254,54 +254,38 @@ test("консенсус: REFUTED от САМОЙ деградированной
 
 // ---- Калибровка 2026-08-12: суффикс-резолв усечённых путей цитат ----
 
-test("resolveCitedPath: усечённый абсолютный путь резолвится уникальным суффиксом против tracked", async () => {
-  const { resolveCitedPath } = await import("../src/refute-parser.ts");
+test("citedPathCandidates: усечённый путь даёт единственного кандидата при уникальном суффиксе", async () => {
+  const { citedPathCandidates } = await import("../src/refute-parser.ts");
   const tracked = [
     "apps/medusa/src/api/admin/acme/orders/[id]/cancel/route.ts",
     "apps/medusa/src/api/admin/acme/orders/[id]/retry/route.ts",
     "packages/plugin-1c/src/write/payload.ts",
   ];
-  assert.equal(
-    resolveCitedPath("/cancel/route.ts", tracked),
-    "apps/medusa/src/api/admin/acme/orders/[id]/cancel/route.ts",
+  assert.deepEqual(
+    citedPathCandidates("/cancel/route.ts", tracked),
+    ["apps/medusa/src/api/admin/acme/orders/[id]/cancel/route.ts"],
   );
-  assert.equal(
-    resolveCitedPath("cancel/route.ts", tracked),
-    "apps/medusa/src/api/admin/acme/orders/[id]/cancel/route.ts",
+  assert.deepEqual(
+    citedPathCandidates("cancel/route.ts", tracked),
+    ["apps/medusa/src/api/admin/acme/orders/[id]/cancel/route.ts"],
   );
-  assert.equal(
-    resolveCitedPath("./write/payload.ts", tracked),
-    "packages/plugin-1c/src/write/payload.ts",
+  assert.deepEqual(
+    citedPathCandidates("./write/payload.ts", tracked),
+    ["packages/plugin-1c/src/write/payload.ts"],
   );
 });
 
-test("resolveCitedPath: НЕОДНОЗНАЧНЫЙ суффикс (2+ tracked) — null, не выбор первого", async () => {
-  const { resolveCitedPath } = await import("../src/refute-parser.ts");
-  const tracked = ["apps/a/cancel/route.ts", "apps/b/cancel/route.ts"];
-  assert.equal(resolveCitedPath("/cancel/route.ts", tracked), null);
-  assert.equal(resolveCitedPath("route.ts", tracked), null);
-});
-
-test("resolveCitedPath: точное совпадение с tracked бьёт суффикс-омонимы", async () => {
-  const { resolveCitedPath } = await import("../src/refute-parser.ts");
-  const tracked = ["src/pay.ts", "vendor/src/pay.ts"];
-  // цитата "src/pay.ts" точно называет tracked-файл — vendor-омоним не делает её неоднозначной
-  assert.equal(resolveCitedPath("src/pay.ts", tracked), "src/pay.ts");
-});
-
-test("resolveCitedPath: суффикс только по ЦЕЛЫМ сегментам — обрубок имени не матчится", async () => {
-  const { resolveCitedPath } = await import("../src/refute-parser.ts");
+test("citedPathCandidates: суффикс только по ЦЕЛЫМ сегментам — обрубок имени не кандидат", async () => {
+  const { citedPathCandidates } = await import("../src/refute-parser.ts");
   const tracked = ["apps/a/cancel/route.ts"];
-  assert.equal(resolveCitedPath("ncel/route.ts", tracked), null);
-  assert.equal(resolveCitedPath("oute.ts", tracked), null);
+  assert.deepEqual(citedPathCandidates("ncel/route.ts", tracked), []);
+  assert.deepEqual(citedPathCandidates("oute.ts", tracked), []);
 });
 
-test("resolveCitedPath: нет совпадений / пустая цитата — null", async () => {
-  const { resolveCitedPath } = await import("../src/refute-parser.ts");
-  assert.equal(resolveCitedPath("missing.ts", ["src/pay.ts"]), null);
-  assert.equal(resolveCitedPath("", ["src/pay.ts"]), null);
-  assert.equal(resolveCitedPath("/", ["src/pay.ts"]), null);
-  assert.equal(resolveCitedPath("./", ["src/pay.ts"]), null);
+test("citedPathCandidates: пустые/корневые формы пути — пусто", async () => {
+  const { citedPathCandidates } = await import("../src/refute-parser.ts");
+  assert.deepEqual(citedPathCandidates("/", ["src/pay.ts"]), []);
+  assert.deepEqual(citedPathCandidates("./", ["src/pay.ts"]), []);
 });
 
 // ---- Калибровка 2026-08-12: цитата, разорванная переносом в комментарии (кейс E1) ----
@@ -355,4 +339,60 @@ test("quoteMatches: закрывающий «*/» НЕ стрипается в �
   const { quoteMatches } = await import("../src/refute-parser.ts");
   const file = "alphaValue\n */\nbetaValue";
   assert.equal(quoteMatches("alphaValue / betaValue", file, 1), false);
+});
+
+// ---- Волна ambiguous-citations: дизамбигуация омонимов по содержимому ----
+
+test("citedPathCandidates: точное совпадение -> один кандидат; суффикс-омонимы -> все; мимо -> []", async () => {
+  const { citedPathCandidates } = await import("../src/refute-parser.ts");
+  const tracked = ["apps/a/cancel/route.ts", "apps/b/cancel/route.ts", "src/pay.ts", "vendor/src/pay.ts"];
+  assert.deepEqual(citedPathCandidates("src/pay.ts", tracked), ["src/pay.ts"]); // exact бьёт vendor-омоним
+  assert.deepEqual(citedPathCandidates("/cancel/route.ts", tracked),
+    ["apps/a/cancel/route.ts", "apps/b/cancel/route.ts"]);
+  assert.deepEqual(citedPathCandidates("missing.ts", tracked), []);
+  assert.deepEqual(citedPathCandidates("", tracked), []);
+});
+
+test("uniqueQuoteMatch: цитата ровно в ОДНОМ кандидате -> true; в двух -> false; в нуле -> false", async () => {
+  const { uniqueQuoteMatch } = await import("../src/refute-parser.ts");
+  const withQuote = "await ledger.withLock(order.id, async () => spend())";
+  const other = "export const somethingElseEntirely = configureRoutes();";
+  assert.equal(uniqueQuoteMatch("ledger.withLock(order.id", [withQuote, other], 1), true);
+  assert.equal(uniqueQuoteMatch("ledger.withLock(order.id", [withQuote, withQuote], 1), false);
+  assert.equal(uniqueQuoteMatch("ledger.withLock(order.id", [other, other], 1), false);
+  assert.equal(uniqueQuoteMatch("ledger.withLock(order.id", [], 1), false);
+});
+
+test("uniqueQuoteMatch: нечитаемый кандидат (null) = уникальность недоказуема -> false, даже если другой совпал", async () => {
+  const { uniqueQuoteMatch } = await import("../src/refute-parser.ts");
+  const withQuote = "await ledger.withLock(order.id, async () => spend())";
+  assert.equal(uniqueQuoteMatch("ledger.withLock(order.id", [withQuote, null], 1), false);
+  assert.equal(uniqueQuoteMatch("ledger.withLock(order.id", [null], 1), false);
+});
+
+test("uniqueQuoteMatch: line-anchor действует per-кандидат — совпадение вне окна не считается", async () => {
+  const { QUOTE_LINE_TOL, uniqueQuoteMatch } = await import("../src/refute-parser.ts");
+  const pad = Array.from({ length: QUOTE_LINE_TOL + 10 }, (_, i) => `const filler${i} = ${i};`).join("\n");
+  const nearLine1 = "await ledger.withLock(order.id, async () => spend())";
+  const farFromLine1 = pad + "\nawait ledger.withLock(order.id, async () => spend())";
+  // в одном кандидате цитата у строки 1, в другом — за окном ±20: уникальность ЕСТЬ
+  assert.equal(uniqueQuoteMatch("ledger.withLock(order.id", [nearLine1, farFromLine1], 1), true);
+  // а если бы окно игнорировалось — совпали бы оба и был бы false; проверяем и это направление:
+  assert.equal(uniqueQuoteMatch("ledger.withLock(order.id", [farFromLine1, farFromLine1], 1), false);
+});
+
+test("uniqueQuoteMatch: используется ИМЕННО переданная строка вердикта, не константа", async () => {
+  const { uniqueQuoteMatch } = await import("../src/refute-parser.ts");
+  const pad = Array.from({ length: 38 }, (_, i) => `const filler${i} = ${i};`).join("\n");
+  const quoteAtLine39 = pad + "\nawait ledger.withLock(order.id, async () => spend())";
+  const noQuote = "export const somethingElseEntirely = configureRoutes();";
+  // вердикт указывает строку 39 — цитата в окне, уникальна -> true;
+  // мутант с зашитой строкой 1 увидел бы её вне окна ±20 и дал false
+  assert.equal(uniqueQuoteMatch("ledger.withLock(order.id", [quoteAtLine39, noQuote], 39), true);
+  assert.equal(uniqueQuoteMatch("ledger.withLock(order.id", [quoteAtLine39, noQuote], 1), false);
+});
+
+test("консенсус: обе роли degraded -> escalate/degraded_role без confidence_lowered", () => {
+  const r = computeConsensus(v("REFUTED", true), v("REFUTED", true), { p: true, a: true });
+  assert.deepEqual(r, { consensus: "escalate", escalateReason: "degraded_role" });
 });

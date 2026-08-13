@@ -40,20 +40,38 @@ export function quoteMatches(quote: string, fileText: string, line: number | nul
   return normalizeQuote(window.map((l) => l.replace(LINE_DECOR_RE, "")).join("\n")).includes(q);
 }
 
+/** Reading N homonym candidates costs N file reads — above this the citation
+ *  fails outright. The cap must REJECT, never sample: uniqueness judged on a
+ *  subset is no uniqueness at all (a match could hide in the unread tail). */
+export const MAX_CITED_CANDIDATES = 8;
+
 /**
- * Resolve a possibly TRUNCATED cited path against the tracked-file list by
- * whole-segment suffix (same class as review-parser commonTail: models cite
- * "/cancel/route.ts" for a deep route). An exact tracked path wins outright;
- * otherwise the suffix must be UNIQUE — picking the first of several homonyms
- * could verify a quote against the wrong file, so ambiguity fails the citation
- * (fail-safe: this function may only turn citation failures into honest reads).
+ * Candidate tracked paths for a possibly TRUNCATED citation, by whole-segment
+ * suffix (same class as review-parser commonTail: models cite
+ * "/cancel/route.ts" for a deep route). An exact tracked path wins outright —
+ * a citation that names a real file is not made ambiguous by a homonym.
  */
-export function resolveCitedPath(cited: string, tracked: readonly string[]): string | null {
+export function citedPathCandidates(cited: string, tracked: readonly string[]): string[] {
   const c = cited.trim().replace(/^(?:\.\/)+/u, "").replace(/^\/+/u, "");
-  if (c === "") return null;
-  if (tracked.includes(c)) return c;
-  const matches = tracked.filter((t) => t.endsWith("/" + c));
-  return matches.length === 1 ? matches[0]! : null;
+  if (c === "") return [];
+  if (tracked.includes(c)) return [c];
+  return tracked.filter((t) => t.endsWith("/" + c));
+}
+
+/**
+ * Content-based disambiguation of homonym candidates: the citation is verified
+ * only when the quote matches (line-anchored, substance-checked) in EXACTLY ONE
+ * candidate — content uniqueness pins the file identity that the truncated path
+ * could not. Two matches = unknowable which file the role meant; an unreadable
+ * candidate (null) makes uniqueness unprovable — both fail the citation.
+ */
+export function uniqueQuoteMatch(
+  quote: string,
+  texts: ReadonlyArray<string | null>,
+  line: number | null,
+): boolean {
+  if (texts.length === 0 || texts.some((t) => t === null)) return false;
+  return texts.filter((t) => quoteMatches(quote, t as string, line)).length === 1;
 }
 
 export const REFUTE_VERDICTS = ["CONFIRMED", "REFUTED", "UNCLEAR"] as const;
